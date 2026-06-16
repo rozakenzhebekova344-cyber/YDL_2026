@@ -164,6 +164,44 @@
     text-shadow: 0 6px 24px rgba(34, 197, 94, 0.5);
   }
 
+  /* Праздник при переходе на новый уровень */
+  .levelup {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: rgba(15, 23, 42, 0.9);
+    backdrop-filter: blur(4px);
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  .levelup.visible { opacity: 1; }
+  .lvl-title {
+    font-size: 2.4rem;
+    font-weight: 800;
+    color: var(--accent);
+    text-shadow: 0 6px 24px rgba(34, 197, 94, 0.45);
+  }
+  .lvl-cat {
+    width: 220px;
+    height: 220px;
+    object-fit: contain;
+    border-radius: 18px;
+    background: #0b3d1e;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+    animation: bounce 0.6s ease-in-out infinite alternate;
+  }
+  .lvl-sub { color: var(--text); font-size: 1.1rem; font-weight: 600; }
+  @keyframes bounce {
+    from { transform: translateY(0) scale(1); }
+    to   { transform: translateY(-10px) scale(1.03); }
+  }
+
   button {
     margin-top: 8px;
     padding: 12px 30px;
@@ -181,6 +219,25 @@
   button:active { transform: translateY(0); }
 
   .hint { color: var(--muted); font-size: 0.9rem; margin: 0; }
+
+  .loader {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button.ghost {
+    margin: 0;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid #334155;
+    box-shadow: none;
+    font-size: 0.95rem;
+    padding: 10px 18px;
+  }
+  button.ghost:hover { transform: translateY(-1px); border-color: var(--accent); box-shadow: none; }
+  .loader .src { color: var(--muted); font-size: 0.9rem; }
 </style>
 </head>
 <body>
@@ -204,6 +261,11 @@
       <div class="read">Читай вопрос…</div>
       <div class="num" id="countNum">7</div>
     </div>
+    <div class="levelup" id="levelup">
+      <div class="lvl-title" id="lvlTitle">🎉 Раунд 2!</div>
+      <img class="lvl-cat" id="lvlCat" src="img/dancing-cat.gif" alt="Танцующий котёнок" />
+      <div class="lvl-sub">Вопросы стали сложнее — поехали!</div>
+    </div>
     <div class="overlay" id="overlay">
       <h2>Game Over</h2>
       <p>Ваш счёт: <span id="finalScore">0</span></p>
@@ -213,6 +275,13 @@
 
   <p class="hint">Веди змейку стрелками ← ↑ → ↓ к номеру правильного ответа</p>
 
+  <div class="loader">
+    <input type="file" id="docxInput" accept=".docx" hidden />
+    <button id="loadDocx" class="ghost">📄 Загрузить вопросы из Word (.docx)</button>
+    <span class="src" id="srcInfo">Источник вопросов: встроенные</span>
+  </div>
+
+<script src="lib/jszip.min.js"></script>
 <script>
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
@@ -227,10 +296,32 @@
   const feedbackEl = document.getElementById('feedback');
   const countdownEl = document.getElementById('countdown');
   const countNumEl = document.getElementById('countNum');
+  const levelupEl = document.getElementById('levelup');
+  const lvlTitleEl = document.getElementById('lvlTitle');
+  const docxInput = document.getElementById('docxInput');
+  const loadDocxBtn = document.getElementById('loadDocx');
+  const srcInfoEl = document.getElementById('srcInfo');
+
+  // ---- Звуки (Mixkit Free License, можно без атрибуции) ----
+  const SOUNDS = {
+    correct: new Audio('sounds/correct.mp3'), // правильный ответ
+    wrong:   new Audio('sounds/wrong.mp3'),   // неправильный ответ
+    point:   new Audio('sounds/point.mp3'),   // начисление очков
+  };
+  Object.values(SOUNDS).forEach(a => { a.preload = 'auto'; a.volume = 0.6; });
+
+  function play(name) {
+    const base = SOUNDS[name];
+    if (!base) return;
+    const a = base.cloneNode();   // клон позволяет звукам накладываться/повторяться
+    a.volume = base.volume;
+    a.play().catch(() => {});     // браузер разрешит воспроизведение после первого нажатия клавиши
+  }
 
   // ---- Банк вопросов (общая эрудиция по биологии) ----
+  // Встроенные вопросы по умолчанию. Можно заменить, загрузив свой Word-файл.
   // correct — индекс правильного варианта; level — сложность (1 — легко … 4 — сложно)
-  const QUESTIONS = [
+  let QUESTIONS = [
     // --- Уровень 1 (раунд 1): простые ---
     { level: 1, q: 'Какой газ растения выделяют при фотосинтезе?', options: ['Кислород', 'Углекислый газ', 'Азот', 'Водород'], correct: 0 },
     { level: 1, q: 'Сколько камер в сердце человека?', options: ['Четыре', 'Две', 'Три', 'Шесть'], correct: 0 },
@@ -272,7 +363,7 @@
     { level: 4, q: 'Процесс поддержания постоянства внутренней среды?', options: ['Гомеостаз', 'Метаболизм', 'Фотосинтез', 'Митоз'], correct: 0 },
   ];
 
-  const MAX_LEVEL = Math.max(...QUESTIONS.map(q => q.level)); // самый высокий уровень сложности
+  let MAX_LEVEL = Math.max(...QUESTIONS.map(q => q.level)); // самый высокий уровень сложности
   const POINTS_PER_ROUND = 50;          // очков для перехода в следующий раунд
 
   const GRID = 20;                       // клеток по стороне
@@ -282,6 +373,7 @@
   const SPEED_STEP = 12;                 // ускорение каждый раунд
   const MIN_SPEED = 220;                 // предел скорости (не быстрее)
   const READ_TIME = 7;                   // секунд на чтение вопроса перед стартом
+  const LEVELUP_MS = 3200;               // длительность показа котёнка при новом уровне
 
   const FOOD_COLORS = ['#f59e0b', '#3b82f6', '#ec4899', '#a855f7']; // цвета номеров 1-4
 
@@ -289,11 +381,12 @@
   let snake, dir, nextDir, score, best = 0, running, loopId, countId;
   let foods;            // [{x,y,opt}] — opt: индекс варианта (0..3)
   let current;          // текущий вопрос {q, options(shuffled), correctPos}
-  let lastQ = -1;
+  const usedQuestions = new Set(); // индексы уже заданных вопросов (чтобы не повторялись)
 
   function reset() {
     round = 1;
     roundEl.textContent = round;
+    usedQuestions.clear();   // в новой игре вопросы снова доступны
     snake = [{ x: 6, y: 10 }, { x: 5, y: 10 }, { x: 4, y: 10 }];
     dir = { x: 1, y: 0 };
     nextDir = { x: 1, y: 0 };
@@ -308,8 +401,22 @@
     draw();
   }
 
+  // Праздничный экран с танцующим котёнком при переходе на новый уровень
+  function celebrateLevelUp(n, harder) {
+    running = false;
+    clearInterval(loopId);
+    clearInterval(countId);
+    lvlTitleEl.textContent = `🎉 Раунд ${n}!`;
+    levelupEl.classList.add('visible');
+    setTimeout(() => {
+      levelupEl.classList.remove('visible');
+      newQuestion();   // загрузит более сложный вопрос и запустит отсчёт на чтение
+    }, LEVELUP_MS);
+  }
+
   // Обратный отсчёт перед началом движения (перед каждым вопросом)
   function startCountdown() {
+    levelupEl.classList.remove('visible');
     running = false;
     clearInterval(loopId);
     clearInterval(countId);
@@ -350,11 +457,14 @@
       .filter(item => item.q.level === level)
       .map(item => item.i);
 
-    // выбираем вопрос из пула, не повторяя предыдущий
-    let idx;
-    do { idx = pool[Math.floor(Math.random() * pool.length)]; }
-    while (idx === lastQ && pool.length > 1);
-    lastQ = idx;
+    // выбираем ещё не заданный вопрос; когда все в уровне исчерпаны — начинаем уровень заново
+    let available = pool.filter(i => !usedQuestions.has(i));
+    if (available.length === 0) {
+      pool.forEach(i => usedQuestions.delete(i)); // сбрасываем только этот уровень
+      available = pool;
+    }
+    const idx = available[Math.floor(Math.random() * available.length)];
+    usedQuestions.add(idx);
 
     const base = QUESTIONS[idx];
     const correctText = base.options[base.correct];
@@ -417,6 +527,8 @@
         scoreEl.textContent = score;
         showFeedback(true);
         flashOption(hit.opt, true);
+        play('correct');                      // звук правильного ответа
+        setTimeout(() => play('point'), 200);  // звук начисления очков
         // переход в следующий раунд при наборе порога очков
         if (score >= round * POINTS_PER_ROUND) {
           round++;
@@ -424,6 +536,10 @@
           const harder = round <= MAX_LEVEL ? ' Вопросы сложнее!' : '';
           feedbackEl.textContent = `🎉 Раунд ${round}!${harder}`;
           feedbackEl.className = 'feedback ok';
+          // праздник с танцующим котёнком, затем следующий (сложнее) вопрос
+          celebrateLevelUp(round, harder);
+          draw();          // показать выросшую змейку под оверлеем
+          return;
         }
         // не выбрасываем хвост — змейка растёт; через паузу новый вопрос
         newQuestion();
@@ -432,6 +548,7 @@
         scoreEl.textContent = score;
         showFeedback(false);
         flashOption(hit.opt, false);
+        play('wrong');                        // звук неправильного ответа
         // штраф только очками: змейка не растёт, ошибочная кормушка исчезает
         foods = foods.filter(f => f !== hit);
         snake.pop();
@@ -505,6 +622,7 @@
     clearInterval(loopId);
     clearInterval(countId);
     countdownEl.classList.remove('visible');
+    levelupEl.classList.remove('visible');
     if (score > best) { best = score; bestEl.textContent = best; }
     finalScoreEl.textContent = score;
     overlay.classList.add('visible');
@@ -525,6 +643,88 @@
   });
 
   restartBtn.addEventListener('click', reset);
+
+  // ---- Загрузка вопросов из Word-файла (.docx) ----
+  loadDocxBtn.addEventListener('click', () => docxInput.click());
+  docxInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const zip = await JSZip.loadAsync(buf);
+      const docFile = zip.file('word/document.xml');
+      if (!docFile) throw new Error('Это не похоже на файл Word (.docx)');
+      const xml = await docFile.async('string');
+      const parsed = parseDocxQuestions(xml);
+      if (parsed.length === 0) {
+        alert('В файле не найдено ни одного вопроса в нужном формате.\n\n' +
+              'Проверьте формат: строка вопроса начинается с [уровня], ' +
+              'правильный ответ — со знака «+», неправильные — со знака «-».');
+        return;
+      }
+      QUESTIONS = parsed;
+      MAX_LEVEL = Math.max(...QUESTIONS.map(q => q.level));
+      srcInfoEl.textContent = `Источник вопросов: ${file.name} (${parsed.length})`;
+      reset();   // начинаем новую игру уже с вашими вопросами
+    } catch (err) {
+      alert('Не удалось прочитать файл: ' + err.message);
+    } finally {
+      docxInput.value = '';   // позволяет выбрать тот же файл повторно
+    }
+  });
+
+  // Превращает текст document.xml в массив вопросов игры
+  function parseDocxQuestions(xml) {
+    // каждый абзац <w:p> → одна строка; внутри собираем все фрагменты текста <w:t>
+    const paragraphs = xml.split(/<\/w:p>/).map(chunk => {
+      const parts = [...chunk.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)].map(m => m[1]);
+      return unescapeXml(parts.join('')).trim();
+    });
+
+    // если в документе есть строка-разделитель «====», берём вопросы только после неё
+    // (чтобы инструкция и пример сверху не попали в игру)
+    const hasMarker = paragraphs.some(l => l.includes('===='));
+    let active = !hasMarker;
+
+    const questions = [];
+    let cur = null;
+    const pushCur = () => {
+      if (cur && cur.correct >= 0 && cur.options.length >= 2 &&
+          cur.options.every(o => o.length > 0)) {
+        questions.push({ level: cur.level, q: cur.q, options: cur.options, correct: cur.correct });
+      }
+      cur = null;
+    };
+
+    for (const line of paragraphs) {
+      if (!active) { if (line.includes('====')) active = true; continue; }
+      if (line.includes('====') || line === '') continue;
+
+      const mq = line.match(/^\[(\d+)\]\s*(.+)$/);   // [уровень] текст вопроса
+      if (mq) {
+        pushCur();
+        cur = { level: parseInt(mq[1], 10) || 1, q: mq[2].trim(), options: [], correct: -1 };
+        continue;
+      }
+      if (!cur) continue;
+
+      const f = line[0];
+      if (f === '+') {                                // правильный ответ
+        cur.correct = cur.options.length;
+        cur.options.push(line.slice(1).trim());
+      } else if (f === '-' || f === '−' || f === '*' || f === '•') { // неправильный
+        cur.options.push(line.slice(1).trim());
+      }
+    }
+    pushCur();
+    return questions;
+  }
+
+  function unescapeXml(s) {
+    return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+            .replace(/&amp;/g, '&');
+  }
 
   reset();
 </script>
